@@ -379,7 +379,6 @@ void check_files_for_merge() {
 }
 
 void merge_elf_files() {
-    
     if (files[0].fd == -1 || files[1].fd == -1) {
         printf("Error: Two ELF files must be opened first.\n");
         return;
@@ -401,17 +400,24 @@ void merge_elf_files() {
     Elf32_Shdr *new_shdr_table = malloc(ehdr1->e_shnum * sizeof(Elf32_Shdr));
     memcpy(new_shdr_table, shdr1, ehdr1->e_shnum * sizeof(Elf32_Shdr));
 
+    // נחפש את ה-index של טבלת הסימבולים
+    int symtab_idx = -1;
+    for(int i=0; i < ehdr1->e_shnum; i++) {
+        if(shdr1[i].sh_type == SHT_SYMTAB) {
+            symtab_idx = i;
+            break;
+        }
+    }
+
     write(out_fd, &new_ehdr, sizeof(Elf32_Ehdr));
 
     for (int i = 0; i < ehdr1->e_shnum; i++) {
         if (i == 0) continue; 
 
         char *sec_name = shstrtab1 + shdr1[i].sh_name;
-        
         new_shdr_table[i].sh_offset = lseek(out_fd, 0, SEEK_CUR);
 
         if (strcmp(sec_name, ".text") == 0 || strcmp(sec_name, ".data") == 0 || strcmp(sec_name, ".rodata") == 0) {
-            
             write(out_fd, files[0].map_start + shdr1[i].sh_offset, shdr1[i].sh_size);
             
             int found_in_2 = -1;
@@ -428,6 +434,40 @@ void merge_elf_files() {
                 new_shdr_table[i].sh_size = shdr1[i].sh_size + shdr2[found_in_2].sh_size;
             }
         } 
+        else if (i == symtab_idx) {
+            // --- שלב הבונוס: Symbol Resolution ---
+            int num_syms1 = shdr1[i].sh_size / sizeof(Elf32_Sym);
+            Elf32_Sym *new_symtab = malloc(shdr1[i].sh_size);
+            memcpy(new_symtab, files[0].map_start + shdr1[i].sh_offset, shdr1[i].sh_size);
+
+            // מציאת טבלת הסימבולים והמחרוזות של קובץ 2
+            Elf32_Shdr *symtab2_hdr = NULL;
+            for(int j=0; j < ehdr2->e_shnum; j++) if(shdr2[j].sh_type == SHT_SYMTAB) symtab2_hdr = &shdr2[j];
+            
+            if (symtab2_hdr) {
+                Elf32_Sym *syms2 = (Elf32_Sym *)(files[1].map_start + symtab2_hdr->sh_offset);
+                char *strs1 = (char *)(files[0].map_start + shdr1[shdr1[i].sh_link].sh_offset);
+                char *strs2 = (char *)(files[1].map_start + shdr2[symtab2_hdr->sh_link].sh_offset);
+                int num_syms2 = symtab2_hdr->sh_size / sizeof(Elf32_Sym);
+
+                for (int k = 1; k < num_syms1; k++) {
+                    if (new_symtab[k].st_shndx == SHN_UNDEF) { // סימבול לא מוגדר בקובץ 1
+                        char *name = strs1 + new_symtab[k].st_name;
+                        for (int m = 1; m < num_syms2; m++) {
+                            if (strcmp(name, strs2 + syms2[m].st_name) == 0 && syms2[m].st_shndx != SHN_UNDEF) {
+                                // העתקת ההגדרה מקובץ 2
+                                new_symtab[k].st_shndx = syms2[m].st_shndx;
+                                // חישוב הערך החדש: ערך מקורי + גודל ה-section בקובץ 1
+                                new_symtab[k].st_value = syms2[m].st_value + shdr1[syms2[m].st_shndx].sh_size;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            write(out_fd, new_symtab, shdr1[i].sh_size);
+            free(new_symtab);
+        }
         else {
             write(out_fd, files[0].map_start + shdr1[i].sh_offset, shdr1[i].sh_size);
             new_shdr_table[i].sh_size = shdr1[i].sh_size;
@@ -443,7 +483,7 @@ void merge_elf_files() {
 
     free(new_shdr_table);
     close(out_fd);
-    printf("Merge completed successfully into out.ro\n");
+    printf("Merge completed successfully (with symbol resolution) into out.ro\n");
 }
 
 // ------------ Part 3 -------------

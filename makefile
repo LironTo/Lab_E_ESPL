@@ -7,4 +7,4 @@ compile: clean
 	gcc -g -m32 -Wall -c -o myELF.o myELF.c
 
 clean:
-	rm -f *.o myELF
+	rm -f myELF
